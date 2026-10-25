@@ -1,0 +1,485 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Home</title>
+<style>
+/* Wheel launcher for CleanYourTV, ported from TWBankston/Seeker-TV-Launcher's wheel mockup
+   (design/seeker-tv-mockup-v3.html) to run as CleanYourTV's app/index.html on webOS.
+   Talks to CleanYourTV's own loopback API (helper/apps.js): GET /api/apps, GET /icon/<id>,
+   POST /api/launch, POST /api/config. Icon colour extraction is CleanYourTV's own iconColor()
+   (ported verbatim from its stock app/index.html) so app colours look consistent with the rest
+   of the system. Weather: Open-Meteo, no API key, fixed to the location chosen at setup time. */
+:root {
+  --bg: #0b0c0e; --dot: #2a2d33; --fg: #e8e9eb; --mute: #70757e; --dim: #3b3f46; --line: #1f2126;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
+#stage {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; transform-origin: 0 0;
+  background: var(--bg); overflow: hidden; outline: none;
+  background-image: radial-gradient(circle, #16181c 1.6px, transparent 1.8px);
+  background-size: 24px 24px; background-position: 12px 12px;
+}
+.glow { position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .35s, background .35s; }
+#matrix, #gear, #menu { position: absolute; top: 0; left: 0; }
+#list { position: absolute; left: 150px; top: 0; height: 1080px; width: 1200px; }
+.app {
+  position: absolute; left: 0; top: 0; display: block; transform-origin: 0 50%;
+  transition: transform .18s cubic-bezier(.2,.7,.2,1), opacity .18s, outline-color .2s;
+  outline: 2px dashed transparent; outline-offset: 16px; border-radius: 4px;
+}
+.app.move { outline-color: var(--c); }
+#rename {
+  position: absolute; left: -9999px; top: 0; opacity: 0; width: 600px; height: 60px; box-sizing: border-box;
+  font: 500 28px var(--mono); color: var(--fg); background: #14161b; border: 2px solid var(--line);
+  border-radius: 8px; padding: 0 20px; outline: none;
+}
+#rename.on { opacity: 1; }
+#cursor { position: absolute; left: 96px; top: 540px; width: 10px; height: 10px; border-radius: 50%; background: var(--c, #e8e9eb); transform: translateY(-50%); box-shadow: 0 0 18px var(--c, #e8e9eb); transition: background .22s, box-shadow .22s; }
+#cursor.move { animation: bob 1s ease-in-out infinite; }
+#cursor.off { opacity: .25; }
+@keyframes bob { 0%,100% { transform: translateY(-50%) translateY(-10px) } 50% { transform: translateY(-50%) translateY(10px) } }
+#takeover { position: absolute; width: 40px; height: 40px; border-radius: 50%; transform: translate(-50%,-50%) scale(0); background: var(--c); pointer-events: none; }
+#takeover.go { transition: transform .55s cubic-bezier(.3,0,.1,1); transform: translate(-50%,-50%) scale(130); }
+#launch { position: absolute; top: 0; left: 0; opacity: 0; transition: opacity .25s; pointer-events: none; }
+#launch.on { opacity: 1; transition-delay: .35s; }
+</style>
+<div id="stage" tabindex="0">
+  <div class="glow" id="glow"></div>
+  <canvas id="matrix" width="1920" height="1080"></canvas>
+  <div id="cursor"></div>
+  <div id="list"></div>
+  <canvas id="gear" width="1920" height="1080"></canvas>
+  <canvas id="menu" width="1920" height="1080"></canvas>
+  <div id="takeover"></div>
+  <canvas id="launch" width="1920" height="1080"></canvas>
+  <input id="rename" type="text" autocomplete="off" maxlength="40">
+</div>
+<script>
+(function () {
+  'use strict';
+
+  // ---------- 5x7 dot font + small icon set (ported from the Seeker wheel mockup) ----------
+  var F = {
+    A:["01110","10001","10001","11111","10001","10001","10001"], B:["11110","10001","10001","11110","10001","10001","11110"],
+    C:["01111","10000","10000","10000","10000","10000","01111"], D:["11110","10001","10001","10001","10001","10001","11110"],
+    E:["11111","10000","10000","11110","10000","10000","11111"], F:["11111","10000","10000","11110","10000","10000","10000"],
+    G:["01111","10000","10000","10111","10001","10001","01111"], H:["10001","10001","10001","11111","10001","10001","10001"],
+    I:["11111","00100","00100","00100","00100","00100","11111"], J:["00001","00001","00001","00001","10001","10001","01110"],
+    K:["10001","10010","10100","11000","10100","10010","10001"], L:["10000","10000","10000","10000","10000","10000","11111"],
+    M:["10001","11011","10101","10101","10001","10001","10001"], N:["10001","11001","10101","10011","10001","10001","10001"],
+    O:["01110","10001","10001","10001","10001","10001","01110"], P:["11110","10001","10001","11110","10000","10000","10000"],
+    Q:["01110","10001","10001","10001","10101","10010","01101"], R:["11110","10001","10001","11110","10100","10010","10001"],
+    S:["01111","10000","10000","01110","00001","00001","11110"], T:["11111","00100","00100","00100","00100","00100","00100"],
+    U:["10001","10001","10001","10001","10001","10001","01110"], V:["10001","10001","10001","10001","01010","01010","00100"],
+    W:["10001","10001","10001","10101","10101","11011","10001"], X:["10001","10001","01010","00100","01010","10001","10001"],
+    Y:["10001","10001","01010","00100","00100","00100","00100"], Z:["11111","00001","00010","00100","01000","10000","11111"],
+    "0":["01110","10001","10011","10101","11001","10001","01110"], "1":["00100","01100","00100","00100","00100","00100","01110"],
+    "2":["01110","10001","00001","00010","00100","01000","11111"], "3":["11111","00010","00100","00010","00001","10001","01110"],
+    "4":["00010","00110","01010","10010","11111","00010","00010"], "5":["11111","10000","11110","00001","00001","10001","01110"],
+    "6":["00111","01000","10000","11110","10001","10001","01110"], "7":["11111","00001","00010","00100","01000","01000","01000"],
+    "8":["01110","10001","10001","01110","10001","10001","01110"], "9":["01110","10001","10001","01111","00001","00010","11100"],
+    " ":["00000","00000","00000","00000","00000","00000","00000"], ":":["00000","00100","00100","00000","00100","00100","00000"],
+    "°":["01100","10010","01100","00000","00000","00000","00000"], "+":["00000","00100","00100","11111","00100","00100","00000"],
+    "-":["00000","00000","00000","11111","00000","00000","00000"], ".":["00000","00000","00000","00000","00000","00000","00100"],
+    "!":["00100","00100","00100","00100","00100","00000","00100"], "/":["00001","00001","00010","00100","01000","10000","10000"],
+    "&":["01100","10010","10100","01000","10101","10010","01101"]
+  };
+  var ICONS = {
+    sun:  ["000010000","010000010","000111000","001111100","101111101","001111100","000111000","010000010","000010000"],
+    cloud:["000000000","000011100","000111110","011111111","111111111","111111111","011111110","000000000","000000000"],
+    rain: ["000011100","000111110","011111111","111111111","011111110","000000000","010010010","001001001","010010010"],
+    snow: ["000011100","000111110","011111111","111111111","011111110","000000000","010010010","000000000","001001001"],
+    storm:["000011100","000111110","011111111","111111111","011111110","000011000","000110000","001111000","000010000"],
+    gear: ["000010000","010111010","001111100","011101110","111000111","011101110","001111100","010111010","000010000"]
+  };
+
+  function clean(s) {
+    var out = '';
+    s = String(s || '').toUpperCase();
+    for (var i = 0; i < s.length; i++) out += F[s[i]] ? s[i] : ' ';
+    return out.replace(/ +/g, ' ').trim() || '?';
+  }
+  function dots(c, text, x, y, cell, color, grid, gridColor) {
+    var r = cell * 0.36, cx = x;
+    for (var i = 0; i < text.length; i++) {
+      var g = F[text[i]] || F[' '];
+      for (var row = 0; row < 7; row++) for (var col = 0; col < 5; col++) {
+        var lit = g[row][col] === '1';
+        if (!lit && !grid) continue;
+        c.beginPath(); c.arc(cx + col * cell + cell / 2, y + row * cell + cell / 2, lit ? r : r * 0.7, 0, 6.2832);
+        c.fillStyle = lit ? color : (gridColor || '#2a2d33'); c.fill();
+      }
+      cx += cell * 6;
+    }
+  }
+  function textW(text, cell) { return text.length * cell * 6 - cell; }
+  function icon(c, name, x, y, cell, color, grid) {
+    var g = ICONS[name]; if (!g) return;
+    var r = cell * 0.36;
+    for (var row = 0; row < 9; row++) for (var col = 0; col < 9; col++) {
+      var lit = g[row][col] === '1';
+      if (!lit && !grid) continue;
+      c.beginPath(); c.arc(x + col * cell + cell / 2, y + row * cell + cell / 2, lit ? r : r * 0.7, 0, 6.2832);
+      c.fillStyle = lit ? color : '#2a2d33'; c.fill();
+    }
+  }
+
+  // ---------- colour per app, ported from CleanYourTV's own app/index.html (iconColor/analyse) ----------
+  function hsl2rgb(h, s, l) {
+    var a = s * Math.min(l, 1 - l);
+    function f(n) { var k = (n + h / 30) % 12; return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)))); }
+    return [f(0), f(8), f(4)];
+  }
+  function rgb2hsl(R, G, B) {
+    R /= 255; G /= 255; B /= 255;
+    var mx = Math.max(R, G, B), mn = Math.min(R, G, B), l = (mx + mn) / 2, h = 0, s = 0, d = mx - mn;
+    if (d) { s = d / (1 - Math.abs(2 * l - 1)); h = mx === R ? (G - B) / d + (G < B ? 6 : 0) : mx === G ? (B - R) / d + 2 : (R - G) / d + 4; h *= 60; }
+    return [h, s, l];
+  }
+  function hashHue(id) { var h = 0; for (var i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360; return h; }
+  function iconColor(img, id) {
+    var glow = null, edge = null, N = 16, tainted = false;
+    try {
+      var cv = document.createElement('canvas'); cv.width = cv.height = N;
+      var x = cv.getContext('2d'); x.drawImage(img, 0, 0, N, N);
+      var d = x.getImageData(0, 0, N, N).data, R = 0, G = 0, B = 0, W = 0, eR = 0, eG = 0, eB = 0, eN = 0, ring = 0;
+      for (var y = 0; y < N; y++) for (var xx = 0; xx < N; xx++) {
+        var i = (y * N + xx) * 4, a = d[i + 3] / 255;
+        if (y === 0 || y === N - 1 || xx === 0 || xx === N - 1) {
+          ring++;
+          if (a > 0.8) { eR += d[i]; eG += d[i + 1]; eB += d[i + 2]; eN++; }
+        }
+        if (a < 0.4) continue;
+        var hs = rgb2hsl(d[i], d[i + 1], d[i + 2]), w = a * (0.15 + hs[1] * hs[1]);
+        R += d[i] * w; G += d[i + 1] * w; B += d[i + 2] * w; W += w;
+      }
+      if (eN > ring * 0.5) edge = [Math.round(eR / eN), Math.round(eG / eN), Math.round(eB / eN)];
+      if (W > 0.5) {
+        var h2 = rgb2hsl(R / W, G / W, B / W);
+        if (h2[1] > 0.22) glow = hsl2rgb(h2[0], Math.max(0.5, Math.min(h2[1], 0.8)), Math.max(0.36, Math.min(h2[2], 0.52)));
+      }
+    } catch (e) { tainted = true; }
+    var fb = hsl2rgb(hashHue(id), 0.42, 0.42);
+    glow = glow || (edge && rgb2hsl(edge[0], edge[1], edge[2])[1] > 0.3 ? edge : fb);
+    return tainted ? fb : glow;
+  }
+  function rgbHex(rgb) { return '#' + rgb.map(function (v) { return ('0' + Math.max(0, Math.min(255, v)).toString(16)).slice(-2); }).join(''); }
+  function lum(hex) { var n = parseInt(hex.slice(1), 16); var r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255; return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255; }
+
+  // ---------- stage scaling ----------
+  var stage = document.getElementById('stage');
+  function fit() { var s = window.innerWidth / 1920; stage.style.transform = 'scale(' + s + ')'; }
+  window.addEventListener('resize', fit); fit();
+
+  // ---------- state ----------
+  var ctx = document.getElementById('matrix').getContext('2d');
+  var gctx = document.getElementById('gear').getContext('2d');
+  var mctx = document.getElementById('menu').getContext('2d');
+  var lctx = document.getElementById('launch').getContext('2d');
+  var list = document.getElementById('list'), glow = document.getElementById('glow'), cursor = document.getElementById('cursor');
+  var takeover = document.getElementById('takeover'), launchEl = document.getElementById('launch');
+  var renameInput = document.getElementById('rename');
+  var GEAR = { id: 'com.palm.app.settings', title: clean('Settings'), color: '#9aa3ad' };
+  var HIDDEN_ID = '__hidden__';
+  var apps = [], nodes = [], sel = 0, busy = false, reorder = false, onGear = false, scrolling = false;
+  var mode = 'wheel';          // 'wheel' (normal) or 'hidden' (browsing hidden apps to restore)
+  var menuOpen = false, menuSel = 0;
+  var renaming = null;         // app id currently being renamed, or null
+  var MENU = ['MOVE', 'HIDE', 'RENAME', 'CANCEL'];
+  var rawApps = [], cfg = {}, usage = {};   // the last /api/apps answer, kept so hide/rename/reorder don't need a refetch
+  var weather = { icon: 'cloud', temp: '--°' };
+
+  // ---------- CleanYourTV's own API (helper/apps.js, helper/config.js) ----------
+  // This page is loaded by WAM, not served from the helper's own HTTP origin, so every call needs
+  // the full http://127.0.0.1:8765 base -- a relative '/api/apps' resolves against the wrong origin
+  // and silently fails. CleanYourTV's own stock app/index.html does the same (var API = 'http://127.0.0.1:8765').
+  var API = 'http://127.0.0.1:8765';
+  function api(path, opts) { return fetch(API + path, opts).then(function (r) { return r.json(); }); }
+  function loadApps() {
+    return api('/api/apps').then(function (d) {
+      rawApps = d.apps || []; cfg = d.config || {}; usage = d.usage || {};
+      rebuildWheel(true);
+    });
+  }
+  function saveConfig(patch) { return api('/api/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) }); }
+  function launch(id) { return api('/api/launch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: id }) }); }
+
+  /** Rebuilds `apps` for the current mode from the cached rawApps/cfg/usage -- no refetch needed for
+      hide, rename or reorder, which only change cfg locally and call saveConfig() in the background. */
+  function rebuildWheel(resetSel) {
+    var hidden = cfg.hidden || [], order = cfg.order || [], names = cfg.names || {};
+    var keepId = (apps[sel] || {}).id;
+    if (mode === 'hidden') {
+      apps = rawApps.filter(function (a) { return hidden.indexOf(a.id) >= 0; })
+        .map(function (a) { return { id: a.id, raw: a.title, title: clean(a.title), icon: API + '/icon/' + a.id, color: '#70757e', unhide: true }; });
+    } else {
+      var visible = rawApps.filter(function (a) { return hidden.indexOf(a.id) < 0; });
+      var pos = {}; order.forEach(function (id, i) { pos[id] = i; });
+      visible.sort(function (a, b) {
+        var pa = pos[a.id], pb = pos[b.id];
+        if (pa !== undefined || pb !== undefined) return (pa === undefined ? 1e9 : pa) - (pb === undefined ? 1e9 : pb);
+        return (usage[b.id] || 0) - (usage[a.id] || 0) || a.title.localeCompare(b.title);
+      });
+      apps = visible.map(function (a) {
+        var custom = names[a.id];
+        return { id: a.id, raw: a.title, title: clean(custom || a.title), icon: API + '/icon/' + a.id, color: '#70757e' };
+      });
+      if (hidden.length) apps.push({ id: HIDDEN_ID, raw: 'Hidden apps', title: clean('Hidden (' + hidden.length + ')'), color: '#70757e', browse: true });
+    }
+    resolveColors();
+    buildNodes();
+    if (!resetSel) { var i = apps.findIndex(function (a) { return a.id === keepId; }); sel = i >= 0 ? i : Math.min(sel, Math.max(0, apps.length - 1)); }
+    else sel = 0;
+    layout();
+  }
+  function resolveColors() {
+    apps.forEach(function (a) {
+      if (a.id === HIDDEN_ID) { a.color = '#70757e'; return; }
+      var img = new Image();
+      img.onload = function () { a.color = rgbHex(iconColor(img, a.id)); layout(); };
+      img.onerror = function () { a.color = rgbHex(hsl2rgb(hashHue(a.id), 0.42, 0.42)); layout(); };
+      img.src = a.icon;
+    });
+  }
+  // The service replaces dock/hidden/sort/clock/topbar/order/names as one all-or-nothing group on every
+  // POST /api/config -- whichever of those keys isn't in this specific request body gets cleared, not left
+  // alone (see helper/apps.js: saveLauncherConfig deletes every LAUNCHER_KEY, then only re-adds what's in
+  // this call). So every save here must always send the full current hidden/order/names together, or
+  // whichever one gets left out just silently disappears.
+  function saveLauncherState() { saveConfig({ hidden: cfg.hidden || [], order: cfg.order || [], names: cfg.names || {} }); }
+  function saveOrder() { cfg.order = apps.filter(function (a) { return a.id !== HIDDEN_ID; }).map(function (a) { return a.id; }); saveLauncherState(); }
+  function hideApp(id) {
+    cfg.hidden = (cfg.hidden || []).concat(id);
+    saveLauncherState();
+    rebuildWheel(false);
+  }
+  function unhideApp(id) {
+    cfg.hidden = (cfg.hidden || []).filter(function (x) { return x !== id; });
+    saveLauncherState();
+    if (!cfg.hidden.length) mode = 'wheel';
+    rebuildWheel(false);
+  }
+  function startRename(id) {
+    var a = apps.filter(function (x) { return x.id === id; })[0]; if (!a) return;
+    renaming = id;
+    renameInput.value = (cfg.names || {})[id] || a.raw;
+    renameInput.style.left = '150px'; renameInput.style.top = '860px'; renameInput.className = 'on';
+    renameInput.focus(); renameInput.select();
+  }
+  // Leaving the field always commits -- there's no separate "cancel while typing" path, since webOS's own
+  // on-screen keyboard closes itself in ways that don't reliably send a plain Enter keydown to the page
+  // (its own confirm action, or Back/Home dismissing it) and a silently-discarded rename is worse than a
+  // rename that sticks when you didn't mean it to. Backing out *before* typing anything still works via
+  // CANCEL on the MOVE/HIDE/RENAME/CANCEL menu, which never opens the keyboard at all.
+  function commitRename() {
+    if (!renaming) return;
+    var id = renaming, v = renameInput.value.trim(), a = apps.filter(function (x) { return x.id === id; })[0];
+    cfg.names = cfg.names || {};
+    if (v && a && v !== a.raw) cfg.names[id] = v; else delete cfg.names[id];
+    saveLauncherState();
+    renaming = null; renameInput.className = ''; renameInput.style.left = '-9999px'; stage.focus();
+    rebuildWheel(false);
+  }
+
+  // ---------- weather (Open-Meteo, no key; set YOUR location here before installing) ----------
+  // Look yours up at https://geocoding-api.open-meteo.com/v1/search?name=<your city>, or a US zip
+  // via http://api.zippopotam.us/us/<zip> (returns "places":[{"latitude":...,"longitude":...}]).
+  var LAT = 0, LON = 0;  // <-- set before installing; 0,0 shows weather for the Gulf of Guinea, not your house
+  function codeToIcon(c) {
+    if (c === 0 || c === 1) return 'sun';
+    if (c >= 95) return 'storm';
+    if ((c >= 71 && c <= 77) || c === 85 || c === 86) return 'snow';
+    if ((c >= 51 && c <= 67) || (c >= 80 && c <= 82)) return 'rain';
+    return 'cloud';
+  }
+  function loadWeather() {
+    fetch('https://api.open-meteo.com/v1/forecast?latitude=' + LAT + '&longitude=' + LON + '&current=temperature_2m,weather_code&temperature_unit=fahrenheit&timezone=auto')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || !d.current) return;
+        weather = { icon: codeToIcon(d.current.weather_code), temp: Math.round(d.current.temperature_2m) + '°' };
+        drawMatrix();
+      }).catch(function () {});
+  }
+
+  // ---------- top-right panel: time / date / weather ----------
+  function timeStr() { return new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }).toUpperCase(); }
+  function dateStr() { return new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).toUpperCase(); }
+  function drawMatrix() {
+    ctx.clearRect(0, 0, 1920, 1080);
+    var right = 1920 - 150, y = 120;
+    var hc = 11, t = timeStr(), hw = textW(t, hc);
+    dots(ctx, t, right - hw, y, hc, '#e8e9eb', true);
+    y += 7 * hc + 26;
+    var dc = 5, ds = dateStr(), dw = textW(ds, dc);
+    dots(ctx, ds, right - dw, y, dc, '#8b9098', true);
+    y += 7 * dc + 34;
+    var ic = 7, tc = 7, tw = textW(weather.temp, tc);
+    dots(ctx, weather.temp, right - tw, y + 7, tc, '#e8e9eb', true);
+    icon(ctx, weather.icon, right - tw - 30 - 9 * ic, y, ic, '#e8e9eb', true);
+  }
+  function drawGear() {
+    gctx.clearRect(0, 0, 1920, 1080);
+    var cell = 8, x = 1920 - 150 - 9 * cell, yy = 1080 - 150 - 9 * cell;
+    icon(gctx, 'gear', x, yy, cell, onGear ? '#e8e9eb' : '#3b3f46', true);
+    cursor.className = (reorder ? 'move' : '') + (onGear ? ' off' : '');
+  }
+
+  /** The MOVE/HIDE/RENAME/CANCEL menu, boxed just right of the selected app's name. Opened by holding OK. */
+  function drawMenu() {
+    mctx.clearRect(0, 0, 1920, 1080);
+    if (!menuOpen || !apps.length) return;
+    var app = apps[sel], cell = 6, pad = 26, gap = 22, rowH = 7 * cell, textX = 40;
+    var bw = textX + textW('CANCEL', cell) + pad + 6;
+    var bh = pad * 2 + MENU.length * rowH + (MENU.length - 1) * gap;
+    var left = 150 + textW(app.title, 10) + 64, top = 540 - bh / 2;
+    mctx.fillStyle = '#0e0f12'; mctx.fillRect(left, top, bw, bh);
+    mctx.strokeStyle = '#1f2126'; mctx.strokeRect(left + 0.5, top + 0.5, bw - 1, bh - 1);
+    mctx.fillStyle = app.color; mctx.fillRect(left, top, 4, bh);
+    MENU.forEach(function (label, i) {
+      var y = top + pad + i * (rowH + gap);
+      if (i === menuSel) {
+        mctx.fillStyle = app.color; mctx.beginPath(); mctx.arc(left + 22, y + rowH / 2, 4, 0, 6.2832); mctx.fill();
+        dots(mctx, label, left + textX, y, cell, app.color, true, 'rgba(255,255,255,.07)');
+      } else {
+        dots(mctx, label, left + textX, y, cell, '#70757e', false);
+      }
+    });
+  }
+  function openMenu() { if (!apps.length || onGear) return; menuOpen = true; menuSel = 0; drawMenu(); }
+  function closeMenu() { menuOpen = false; drawMenu(); }
+  function pickMenu() {
+    var app = apps[sel]; closeMenu(); if (!app) return;
+    if (MENU[menuSel] === 'MOVE') setReorder(true);
+    else if (MENU[menuSel] === 'HIDE') hideApp(app.id);
+    else if (MENU[menuSel] === 'RENAME') startRename(app.id);
+  }
+
+  // ---------- wheel ----------
+  var CELL = 10;
+  function buildNodes() {
+    list.innerHTML = ''; nodes = [];
+    apps.forEach(function (a, i) {
+      var cv = document.createElement('canvas'); cv.className = 'app';
+      cv.width = textW(a.title, CELL) + CELL; cv.height = 7 * CELL;
+      cv.style.setProperty('--c', a.color);
+      cv.addEventListener('click', function () {
+        if (busy || reorder) return;
+        if (onGear) { onGear = false; drawGear(); }
+        if (sel === i) go(); else { sel = i; layout(); }
+      });
+      nodes.push(cv); list.appendChild(cv);
+    });
+    sel = Math.min(sel, Math.max(0, apps.length - 1));
+  }
+  function paint(cv, a, state) {
+    var c = cv.getContext('2d'); c.clearRect(0, 0, cv.width, cv.height);
+    var color = state === 'sel' ? a.color : (state === 'far' ? '#3b3f46' : '#70757e');
+    dots(c, a.title, 0, 0, CELL, color, state === 'sel', state === 'sel' ? 'rgba(255,255,255,.07)' : '#2a2d33');
+  }
+  function layout() {
+    if (!apps.length) return;
+    var SP = 118;
+    nodes.forEach(function (cv, i) {
+      var off = i - sel, a = Math.abs(off), app = apps[i];
+      var y = 540 + off * SP, s = Math.max(0.42, 1 - a * 0.14), x = a * a * 14;
+      cv.style.transform = 'translate(' + x + 'px,' + (y - 35) + 'px) scale(' + s + ')';
+      cv.style.opacity = a > 2 ? 0 : (1 - a * 0.22);
+      var state = off === 0 ? (onGear ? 'near' : 'sel') : (a > 2 ? 'far' : 'near');
+      paint(cv, app, state);
+      cv.className = 'app' + (off === 0 && reorder ? ' move' : '');
+    });
+    var c = onGear ? GEAR.color : apps[sel].color;
+    cursor.style.setProperty('--c', apps[sel].color);
+    glow.style.background = 'radial-gradient(900px 700px at ' + (onGear ? '100% 100%' : '0% 50%') + ', color-mix(in srgb, ' + c + ' 14%, transparent), transparent 70%)';
+    glow.style.opacity = 1;
+  }
+  function swap(i, j) { var t = apps[i]; apps[i] = apps[j]; apps[j] = t; t = nodes[i]; nodes[i] = nodes[j]; nodes[j] = t; }
+
+  function go() {
+    if (busy || !apps.length) return;
+    var a0 = onGear ? GEAR : apps[sel];
+    if (a0.id === HIDDEN_ID) { mode = 'hidden'; rebuildWheel(true); return; }
+    if (a0.unhide) { unhideApp(a0.id); return; }
+    busy = true;
+    var a = a0, c = a.color;
+    takeover.style.setProperty('--c', c);
+    takeover.style.left = onGear ? (1920 - 186) + 'px' : '150px';
+    takeover.style.top = onGear ? (1080 - 186) + 'px' : '540px';
+    takeover.className = ''; void takeover.offsetWidth; takeover.className = 'go';
+    var dark = lum(c) > 0.45, ink = dark ? '#0b0c0e' : '#ffffff', faint = dark ? 'rgba(0,0,0,.18)' : 'rgba(255,255,255,.22)';
+    lctx.clearRect(0, 0, 1920, 1080);
+    var name = a.title, cell = name.length > 8 ? 18 : 24, w = textW(name, cell);
+    dots(lctx, name, (1920 - w) / 2, 540 - 7 * cell / 2, cell, ink, true, faint);
+    lctx.fillStyle = ink; lctx.font = '500 22px ' + getComputedStyle(document.documentElement).getPropertyValue('--mono');
+    lctx.textAlign = 'center'; lctx.fillText('O P E N I N G', 960, 540 + 7 * cell / 2 + 70);
+    launchEl.className = 'on';
+    setTimeout(function () { launch(a.id); }, 900);
+    setTimeout(function () { launchEl.className = ''; takeover.className = ''; setTimeout(function () { busy = false; }, 300); }, 1700);
+  }
+
+  // ---------- remote input: Up/Down/Left/Right/Enter, Back = 461 (webOS) / 27 / 8 ----------
+  // Up/Down are debounced with `scrolling`: a press is ignored until the previous step's .3s CSS
+  // transition has had time to finish, so each step is seen rather than jumped over on fast presses
+  // (easier to follow for anyone who finds a fast-moving wheel hard to track).
+  var holdTimer = null, held = false;
+  var STEP_MS = 180;  // kept in sync with .app's .18s CSS transition above, so a step is always seen in full
+  function step(dir) {
+    if (scrolling) return;
+    if (reorder) { if (dir > 0 && sel < apps.length - 1) swap(sel, sel + 1); else if (dir < 0 && sel > 0) swap(sel, sel - 1); }
+    sel = Math.max(0, Math.min(apps.length - 1, sel + dir));
+    scrolling = true; setTimeout(function () { scrolling = false; }, STEP_MS);
+    layout();
+  }
+  function setReorder(on) { reorder = on; if (!on) saveOrder(); drawGear(); layout(); }
+  document.addEventListener('keydown', function (e) {
+    if (e.repeat) { e.preventDefault(); return; }
+    var k = e.keyCode;
+
+    if (document.activeElement === renameInput) {
+      if (k === 13 || k === 461 || k === 27) { e.preventDefault(); commitRename(); }
+      return;  // let every other key type normally into the field
+    }
+    if (menuOpen) {
+      if (k === 40) { if (menuSel < MENU.length - 1) menuSel++; drawMenu(); }
+      else if (k === 38) { if (menuSel > 0) menuSel--; drawMenu(); }
+      else if (k === 13) pickMenu();
+      else if (k === 461 || k === 27 || k === 8) closeMenu();
+      e.preventDefault();
+      return;
+    }
+
+    if (k === 40 && !onGear) { step(1); e.preventDefault(); }
+    else if (k === 38 && !onGear) { step(-1); e.preventDefault(); }
+    else if (k === 39 && !reorder && mode === 'wheel') { onGear = true; drawGear(); layout(); e.preventDefault(); }
+    else if (k === 37 && !reorder) { onGear = false; drawGear(); layout(); e.preventDefault(); }
+    else if (k === 13) {
+      e.preventDefault(); held = false;
+      if (reorder) { setReorder(false); held = true; return; }
+      if (onGear || mode === 'hidden') { go(); held = true; return; }
+      holdTimer = setTimeout(function () { held = true; openMenu(); }, 600);
+    }
+    else if (k === 461 || k === 27 || k === 8) {
+      e.preventDefault();
+      if (reorder) setReorder(false);
+      else if (mode === 'hidden') { mode = 'wheel'; rebuildWheel(true); }
+    }
+  });
+  document.addEventListener('keyup', function (e) {
+    if (document.activeElement === renameInput || menuOpen) return;
+    if (e.keyCode === 13) { clearTimeout(holdTimer); if (!held && !reorder) go(); held = false; }
+  });
+  // Both wired as a safety net: different webOS keyboard implementations signal "done" differently --
+  // some blur the field, some only fire 'change' and leave it focused. commitRename() is a no-op the
+  // second time either way, since it clears `renaming` on the first call.
+  renameInput.addEventListener('blur', function () { if (renaming) commitRename(); });
+  renameInput.addEventListener('change', function () { if (renaming) commitRename(); });
+
+  // ---------- boot ----------
+  loadApps();
+  loadWeather(); setInterval(loadWeather, 15 * 60 * 1000);
+  drawMatrix(); setInterval(drawMatrix, 15000);
+  drawGear();
+  stage.focus();
+})();
+</script>

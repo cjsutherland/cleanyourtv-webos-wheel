@@ -6,9 +6,9 @@ drop-in replacement for its own launcher page, built by porting the WHEEL mode
 from [Seeker TV Launcher](https://github.com/TWBankston/Seeker-TV-Launcher)
 (originally for Android/Google TV) to run as a webOS web app.
 
-| The inspiration | Running on the TV |
+| The design it's ported from | Running on the TV |
 |---|---|
-| ![Inspiration](docs/images/inspiration.png) | ![Early render](docs/images/early-render.jpg) |
+| ![Seeker's wheel mockup](docs/images/inspiration.png) | ![Live on an LG UR8000](docs/images/result.jpg) |
 
 Your app names scroll on a vertical dot-matrix wheel, colour-matched to each
 app's own icon. Clock, date and weather sit top-right. No tiles, no grid, no

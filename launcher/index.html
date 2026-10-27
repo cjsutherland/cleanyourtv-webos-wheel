@@ -188,6 +188,15 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
   var MENU = ['MOVE', 'HIDE', 'RENAME', 'CANCEL'];
   var rawApps = [], cfg = {}, usage = {};   // the last /api/apps answer, kept so hide/rename/reorder don't need a refetch
   var weather = { icon: 'cloud', temp: '--°' };
+  var launchTimers = [];       // pending setTimeouts from go(), so a resume can cancel stale ones (see resetLaunch)
+
+  // Per-app colours, remembered across a reload so a returning TV paints real colours immediately
+  // instead of the grey placeholder while icons re-decode. Purely a per-viewer convenience cache --
+  // CleanYourTV's own hidden/order/names stay server-side; this is only ever a repaint shortcut.
+  var COLOR_CACHE_KEY = 'cjs-wheel.colors.v1';
+  function loadColorCache() { try { return JSON.parse(localStorage.getItem(COLOR_CACHE_KEY) || '{}'); } catch (e) { return {}; } }
+  function saveColorCache() { try { localStorage.setItem(COLOR_CACHE_KEY, JSON.stringify(colorCache)); } catch (e) {} }
+  var colorCache = loadColorCache();
 
   // ---------- CleanYourTV's own API (helper/apps.js, helper/config.js) ----------
   // This page is loaded by WAM, not served from the helper's own HTTP origin, so every call needs
@@ -211,7 +220,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
     var keepId = (apps[sel] || {}).id;
     if (mode === 'hidden') {
       apps = rawApps.filter(function (a) { return hidden.indexOf(a.id) >= 0; })
-        .map(function (a) { return { id: a.id, raw: a.title, title: clean(a.title), icon: API + '/icon/' + a.id, color: '#70757e', unhide: true }; });
+        .map(function (a) { return { id: a.id, raw: a.title, title: clean(a.title), icon: API + '/icon/' + a.id, color: colorCache[a.id] || '#70757e', unhide: true }; });
     } else {
       var visible = rawApps.filter(function (a) { return hidden.indexOf(a.id) < 0; });
       var pos = {}; order.forEach(function (id, i) { pos[id] = i; });
@@ -222,7 +231,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
       });
       apps = visible.map(function (a) {
         var custom = names[a.id];
-        return { id: a.id, raw: a.title, title: clean(custom || a.title), icon: API + '/icon/' + a.id, color: '#70757e' };
+        return { id: a.id, raw: a.title, title: clean(custom || a.title), icon: API + '/icon/' + a.id, color: colorCache[a.id] || '#70757e' };
       });
       if (hidden.length) apps.push({ id: HIDDEN_ID, raw: 'Hidden apps', title: clean('Hidden (' + hidden.length + ')'), color: '#70757e', browse: true });
     }
@@ -235,9 +244,10 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
   function resolveColors() {
     apps.forEach(function (a) {
       if (a.id === HIDDEN_ID) { a.color = '#70757e'; return; }
+      if (colorCache[a.id]) return;  // already painted from cache in rebuildWheel() -- trust it, skip the re-fetch
       var img = new Image();
-      img.onload = function () { a.color = rgbHex(iconColor(img, a.id)); layout(); };
-      img.onerror = function () { a.color = rgbHex(hsl2rgb(hashHue(a.id), 0.42, 0.42)); layout(); };
+      img.onload = function () { a.color = colorCache[a.id] = rgbHex(iconColor(img, a.id)); saveColorCache(); layout(); };
+      img.onerror = function () { a.color = colorCache[a.id] = rgbHex(hsl2rgb(hashHue(a.id), 0.42, 0.42)); saveColorCache(); layout(); };
       img.src = a.icon;
     });
   }
@@ -414,8 +424,22 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
     lctx.fillStyle = ink; lctx.font = '500 22px ' + getComputedStyle(document.documentElement).getPropertyValue('--mono');
     lctx.textAlign = 'center'; lctx.fillText('O P E N I N G', 960, 540 + 7 * cell / 2 + 70);
     launchEl.className = 'on';
-    setTimeout(function () { launch(a.id); }, 900);
-    setTimeout(function () { launchEl.className = ''; takeover.className = ''; setTimeout(function () { busy = false; }, 300); }, 1700);
+    launchTimers.push(setTimeout(function () { launch(a.id); }, 900));
+    launchTimers.push(setTimeout(function () {
+      launchEl.className = ''; takeover.className = '';
+      launchTimers.push(setTimeout(function () { busy = false; }, 300));
+    }, 1700));
+  }
+
+  /** Cancels any pending timers from go() and snaps back to the normal wheel. Needed because webOS
+      doesn't just keep Home running untouched in the background: it sometimes *suspends* it (JS timers
+      pause mid-flight, so go()'s cleanup timers above can fire late -- the launch overlay for the app
+      you just opened is still what's on screen when you come back) and sometimes *fully reloads* it
+      instead (see resume() below). Either way, "coming back to Home" should never leave a stale
+      "launching" overlay sitting on screen. */
+  function resetLaunch() {
+    launchTimers.forEach(clearTimeout); launchTimers = [];
+    busy = false; takeover.className = ''; launchEl.className = '';
   }
 
   // ---------- remote input: Up/Down/Left/Right/Enter, Back = 461 (webOS) / 27 / 8 ----------
@@ -474,6 +498,20 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
   // second time either way, since it clears `renaming` on the first call.
   renameInput.addEventListener('blur', function () { if (renaming) commitRename(); });
   renameInput.addEventListener('change', function () { if (renaming) commitRename(); });
+
+  // ---------- coming back to Home: webOS can either suspend it or fully reload it, and picks between
+  // the two on its own. CleanYourTV's own stock app/index.html handles exactly this by listening for
+  // both signals and refreshing on either: `webOSRelaunch` (fired when an already-running app is
+  // brought back to front) and the standard `visibilitychange`. We do the same, plus clear any launch
+  // overlay left over from before we were sent away. ----------
+  function resume() {
+    resetLaunch();
+    loadApps();
+    loadWeather();
+    drawMatrix();
+  }
+  document.addEventListener('webOSRelaunch', resume);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) resume(); });
 
   // ---------- boot ----------
   loadApps();

@@ -92,6 +92,15 @@ completely.
   as one group on every call — this launcher already accounts for that
   (`saveLauncherState()` always sends all three together), but keep it in mind
   if you extend it further.
+- webOS doesn't reliably just keep Home sitting untouched in the background —
+  it sometimes suspends it (pending timers can fire late once you're back) and
+  sometimes fully reloads it instead. The launcher listens for both signals
+  CleanYourTV's own stock page does (`webOSRelaunch` and `visibilitychange`)
+  and refreshes on either, so a stuck "launching" overlay or a stale app list
+  shouldn't happen — but a full reload still means re-fetching everything from
+  scratch, which is why each app's resolved colour is cached in
+  `localStorage` (`cjs-wheel.colors.v1`) to avoid a grey-then-colour flash on
+  every return to Home.
 - Renaming relies on webOS's own on-screen keyboard; different webOS versions
   may signal "done" differently (blur vs. a change event vs. neither) — both
   are handled, but a third behaviour might not be.

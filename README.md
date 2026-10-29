@@ -96,11 +96,21 @@ completely.
   it sometimes suspends it (pending timers can fire late once you're back) and
   sometimes fully reloads it instead. The launcher listens for both signals
   CleanYourTV's own stock page does (`webOSRelaunch` and `visibilitychange`)
-  and refreshes on either, so a stuck "launching" overlay or a stale app list
-  shouldn't happen — but a full reload still means re-fetching everything from
-  scratch, which is why each app's resolved colour is cached in
-  `localStorage` (`cjs-wheel.colors.v1`) to avoid a grey-then-colour flash on
-  every return to Home.
+  and refreshes on either, so a stale app list shouldn't happen — and a full
+  reload still means re-fetching everything from scratch, which is why each
+  app's resolved colour is cached in `localStorage` (`cjs-wheel.colors.v1`) to
+  avoid a grey-then-colour flash on every return to Home.
+- `go()`'s launch-takeover animation fires the real `/api/launch` call and
+  hides itself in the same tick, not several hundred milliseconds apart. They
+  used to be two separate timers: logged evidence (via a temporary debug
+  endpoint posting to a file, since webOS exposes no remote-debugging target
+  for the privileged Home identity and forwards no console output for it
+  either) showed webOS can snapshot whatever Home looks like at the exact
+  moment it loses focus and replay that frozen snapshot as a fast preview the
+  next time Home regains focus — if that moment landed while the old code's
+  overlay was still showing but the real app had already started launching,
+  you'd see a stuck "launching" screen on returning to Home. Collapsing the
+  gap to zero removes the window where that can happen.
 - Renaming relies on webOS's own on-screen keyboard; different webOS versions
   may signal "done" differently (blur vs. a change event vs. neither) — both
   are handled, but a third behaviour might not be.

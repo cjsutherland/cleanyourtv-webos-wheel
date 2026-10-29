@@ -189,6 +189,16 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
   var rawApps = [], cfg = {}, usage = {};   // the last /api/apps answer, kept so hide/rename/reorder don't need a refetch
   var weather = { icon: 'cloud', temp: '--°' };
   var launchTimers = [];       // pending setTimeouts from go(), so a resume can cancel stale ones (see resetLaunch)
+  // console.log never reaches anywhere we can read: webOS exposes no remote-debugging target for the
+  // privileged Home identity (confirmed: :9998/json only ever lists ordinary third-party apps, never
+  // com.webos.app.home) and doesn't forward its console output to any system log either. So this also
+  // posts to a temporary debug endpoint (see patches/apps.js's /api/debuglog) that just appends a line
+  // to /tmp/wheel-debug.log, readable over SSH. Remove once the lifecycle issue this is chasing is found.
+  function log(msg) {
+    var line = '[wheel ' + new Date().toISOString().slice(11, 23) + '] ' + msg;
+    try { console.log(line); } catch (e) {}
+    try { fetch(API + '/api/debuglog', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ msg: line }) }); } catch (e) {}
+  }
 
   // Per-app colours, remembered across a reload so a returning TV paints real colours immediately
   // instead of the grey placeholder while icons re-decode. Purely a per-viewer convenience cache --
@@ -412,6 +422,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
     if (a0.id === HIDDEN_ID) { mode = 'hidden'; rebuildWheel(true); return; }
     if (a0.unhide) { unhideApp(a0.id); return; }
     busy = true;
+    log('go() start: ' + a0.id);
     var a = a0, c = a.color;
     takeover.style.setProperty('--c', c);
     takeover.style.left = onGear ? (1920 - 186) + 'px' : '150px';
@@ -424,11 +435,21 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
     lctx.fillStyle = ink; lctx.font = '500 22px ' + getComputedStyle(document.documentElement).getPropertyValue('--mono');
     lctx.textAlign = 'center'; lctx.fillText('O P E N I N G', 960, 540 + 7 * cell / 2 + 70);
     launchEl.className = 'on';
-    launchTimers.push(setTimeout(function () { launch(a.id); }, 900));
+    // Hiding the overlay and firing the real launch happen together, not 800ms apart (they used to be
+    // two separate timers, at 900ms and 1700ms). webOS snapshots whatever Home looks like at the exact
+    // moment it loses focus -- which, per logged evidence, can land anywhere in that 800ms gap -- and
+    // replays that frozen snapshot as a fast preview the next time Home regains focus. If the snapshot
+    // landed while our overlay was still showing (confirmed happening via /api/debuglog timestamps: a
+    // visibilitychange to hidden fired partway through the old gap, before the old cleanup timer had
+    // run), that's the stuck "launching" screen reported after returning from an app. Collapsing the
+    // gap to zero means there's no moment where the real app is already launching but our own overlay
+    // is still what's on screen to get caught in a snapshot.
     launchTimers.push(setTimeout(function () {
+      log('go(): hiding takeover + firing /api/launch for ' + a.id);
       launchEl.className = ''; takeover.className = '';
-      launchTimers.push(setTimeout(function () { busy = false; }, 300));
-    }, 1700));
+      launch(a.id);
+      launchTimers.push(setTimeout(function () { busy = false; log('go() done, busy=false'); }, 300));
+    }, 900));
   }
 
   /** Cancels any pending timers from go() and snaps back to the normal wheel. Needed because webOS
@@ -438,6 +459,8 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
       instead (see resume() below). Either way, "coming back to Home" should never leave a stale
       "launching" overlay sitting on screen. */
   function resetLaunch() {
+    log('resetLaunch(): clearing ' + launchTimers.length + ' pending timer(s), busy was ' + busy
+      + ', takeover.className="' + takeover.className + '", launch.className="' + launchEl.className + '"');
     launchTimers.forEach(clearTimeout); launchTimers = [];
     busy = false; takeover.className = ''; launchEl.className = '';
   }
@@ -504,16 +527,25 @@ html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
   // both signals and refreshing on either: `webOSRelaunch` (fired when an already-running app is
   // brought back to front) and the standard `visibilitychange`. We do the same, plus clear any launch
   // overlay left over from before we were sent away. ----------
-  function resume() {
+  function resume(via) {
+    log('resume() via ' + via + ', document.hidden=' + document.hidden + ', document.visibilityState=' + document.visibilityState);
     resetLaunch();
     loadApps();
     loadWeather();
     drawMatrix();
   }
-  document.addEventListener('webOSRelaunch', resume);
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) resume(); });
+  document.addEventListener('webOSRelaunch', function () { resume('webOSRelaunch'); });
+  document.addEventListener('visibilitychange', function () {
+    log('visibilitychange fired, document.hidden=' + document.hidden);
+    if (!document.hidden) resume('visibilitychange');
+  });
+  window.addEventListener('pageshow', function (e) { log('pageshow, persisted=' + e.persisted); });
+  window.addEventListener('pagehide', function (e) { log('pagehide, persisted=' + e.persisted); });
+  window.addEventListener('focus', function () { log('window focus'); });
+  window.addEventListener('blur', function () { log('window blur'); });
 
   // ---------- boot ----------
+  log('boot: page script starting, document.visibilityState=' + document.visibilityState);
   loadApps();
   loadWeather(); setInterval(loadWeather, 15 * 60 * 1000);
   drawMatrix(); setInterval(drawMatrix, 15000);
